@@ -558,7 +558,7 @@ final class ScrollerViewModel: ObservableObject {
         Haptics.touch(intensity: 0.9)
 
         isUnlockPaused = true
-        let pauseDuration: UInt64 = 1_300_000_000 // 1.3s
+        let pauseDuration: UInt64 = 800_000_000 // 0.8s
 
         let now = Date()
         let cooldown = max(0, debug.toastCooldownSeconds)
@@ -787,7 +787,7 @@ struct LeaderboardCard: View {
 struct ContentView: View {
     @StateObject private var vm = ScrollerViewModel()
     @State private var lastFeedbackIndex: Int = -1
-    @State private var scrollPosition: Int? = -1
+    @State private var scrollPosition: Int?          // nil = natural top (leaderboard)
     private let tick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
     @State private var showInventory = false
@@ -804,7 +804,6 @@ struct ContentView: View {
     @State private var pillBounce: Bool = false
 
     var body: some View {
-        GeometryReader { geo in
             ZStack {
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
@@ -832,8 +831,7 @@ struct ContentView: View {
                 .scrollDisabled(vm.isUnlockPaused)
                 .scrollPosition(id: $scrollPosition, anchor: .top)
                 .onChange(of: scrollPosition) { _, newValue in
-                    let idx = newValue ?? -1
-                    guard idx >= 0 else { return }   // leaderboard card — skip game logic
+                    guard let idx = newValue, idx >= 0 else { return }  // nil or leaderboard — skip
                     vm.currentIndex = idx
                     vm.ensurePregenIfNeeded(around: idx)
                     vm.onBecameVisible(index: idx)
@@ -971,7 +969,6 @@ struct ContentView: View {
             .sheet(isPresented: $showInventory) {
                 InventoryView(unlocked: vm.unlockedSkins, seenCountBySkinID: vm.seenCountBySkinID)
             }
-        }
     }
 
     private func easeOut(_ p: Double) -> Double { 1.0 - pow(1.0 - p, 2.0) }
@@ -989,11 +986,13 @@ struct ContentView: View {
 
 struct BlockView: View {
     let item: FeedItem
+    @State private var chevronBounce = false
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
+        ZStack {
             background
 
+            // --- Color name label (bottom-leading) ---
             VStack(alignment: .leading, spacing: 6) {
                 if let skin = item.skin {
                     Text(skin.rarity.label)
@@ -1011,10 +1010,28 @@ struct BlockView: View {
                         .lineLimit(1)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             .padding([.horizontal, .top], 18)
-            .padding(.bottom, 44)          // clears home indicator
+            .padding(.bottom, 44)
             .foregroundStyle(.white)
             .shadow(radius: 8)
+
+            // --- "keep scrolling" prompt (top-center, out of the way) ---
+            VStack(spacing: 4) {
+                Text("keep scrolling")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                Image(systemName: "chevron.compact.down")
+                    .font(.system(size: 18, weight: .semibold))
+                    .offset(y: chevronBounce ? 3 : 0)
+            }
+            .foregroundStyle(.white.opacity(0.22))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 10)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                    chevronBounce = true
+                }
+            }
         }
     }
 

@@ -4,8 +4,11 @@ An iOS app that turns mindless scrolling into a collectible color-discovery expe
 
 ## Features
 
+### Leaderboard Landing Page
+The first card is a fake live leaderboard — a dark, monospaced ranking screen showing other "players" alongside your last session stats. A pulsing red LIVE dot, hourly-rotating fake entries, and internet-handle names (`void_echo`, `pixel_drift`, `dead_scroll`) create the illusion of a competitive community. It's a lie — manufactured social proof designed to pressure you into scrolling. Swipe past it to begin.
+
 ### Infinite Vertical Feed
-A full-screen, vertically paging scroll view generates blocks on the fly. New blocks are pre-generated ahead of the current position so the feed always feels seamless.
+A full-screen, vertically paging scroll view generates blocks on the fly. New blocks are pre-generated ahead of the current position so the feed always feels seamless. Every card carries a subtle "keep scrolling" prompt at the bottom — a bouncing chevron that never lets you forget there's more.
 
 ### Skin Unlock System
 Blocks can carry **skins** — named color treatments you collect just by scrolling past them. Skins come in three rarity tiers:
@@ -14,7 +17,7 @@ Blocks can carry **skins** — named color treatments you collect just by scroll
 |---|---|---|
 | **Common** | 10 | Solid colors (Crimson, Tangerine, Lemon, Jade, Azure, Violet, Magenta, Mint, Cyan, Indigo) |
 | **Rare** | 6 | Gradients (Sunrise, Ocean Glass, Aurora, Grape Soda, Lava, Deep Space) |
-| **Special** | 4 | Patterns — stripes and dots (Barcode Pop, Candy Stripe, Night Dots, Confetti Dots) |
+| **Special** | 12+ | Patterns — stripes, dots, SF Symbol scatters, emoji tiles (Starfield, Heartbeat, Cat Party, Fire Walk, etc.) |
 
 ### Progressive Discovery
 The mix of what you encounter evolves as you scroll:
@@ -25,6 +28,13 @@ The mix of what you encounter evolves as you scroll:
 - **85+** — once all rares are unlocked, special pattern skins enter the pool.
 
 New-skin encounter chances also decrease over time (early 20% → mid 12% → late 8%), keeping unlocks exciting but not overwhelming.
+
+### Unlock Experience
+When you discover a new skin:
+- Scrolling pauses for 0.8s so you can appreciate it
+- A two-note ascending chime (E5 → B5) plays
+- A strong haptic punch fires
+- A translucent toast shows the rarity and name
 
 ### Haptic Feedback
 Every swipe triggers a double-tap rigid haptic for a punchy, aggressive feel. Touch-down and touch-up events produce lighter haptic feedback.
@@ -45,9 +55,6 @@ Tap the **Unlocked** pill to open a sheet showing every skin you've collected, o
 - How many times you've seen it
 - Its RGB values
 
-### Unlock Toasts
-A translucent material pop-up appears briefly each time a new skin is unlocked, showing the rarity and name.
-
 ### Debug Panel
 A built-in debug overlay (bottom-left) lets you tune parameters at runtime:
 
@@ -56,33 +63,54 @@ A built-in debug overlay (bottom-left) lets you tune parameters at runtime:
 - **Toast cooldown** slider
 - **New unlock chance** sliders (early / mid / late)
 
-## Color Generation
+## Color Generation — Behavior-Seeded Palettes
 
-When the player unlocks a **rare** skin, the app dynamically generates a batch of 10 new skins and injects them into the feed pool. This is handled by `attemptUnlock` in `ScrollerViewModel`, the `DynamicCatalogStore` singleton, and supporting types in `GeneratedSet.swift` and `BehaviorSeed.swift`.
+When you unlock a **static rare** skin, the app captures a snapshot of your behavior and uses it to deterministically generate a batch of 10 new skins. No two players who scroll differently will get the same colors.
 
-### How It Works
+### What Gets Recorded
 
-1. **Trigger** — Unlocking any rare skin fires the generation.
-2. **Batch composition** — Each batch creates 6 commons (solid colors), 3 rares (gradients), and 1 special (stripes).
-3. **Hue-based colors** — Colors are built with `Color(hue:saturation:brightness:)` at evenly spaced hue intervals, with fixed saturation (0.7) and brightness (0.9).
-4. **Injection** — The new skins are appended to `DynamicCatalogStore`'s dynamic pools (`dynamicCommons`, `dynamicRares`, `dynamicSpecials`), which are merged with the static catalogs when the feed generates new blocks.
-5. **Boost window** — Generated skins get a 100-block boost window so they appear more frequently right after injection.
-6. **Shimmer cue** — A shimmer animation plays over the Inventory pill to hint that new skins have been added (`InventoryPill+Shimmer.swift`).
+The following metrics are captured at the exact moment of the rare unlock into a `BehaviorSnapshot`:
+
+| Metric | What it measures |
+|---|---|
+| `totalBlocksViewed` | Total cards swiped (including revisits) — measures overall engagement |
+| `blocksSeen` | Unique cards seen — measures exploration breadth |
+| `activeScrollSeconds` | Cumulative seconds spent actively scrolling — measures session intensity |
+| `isScrolling` | Whether the user was mid-scroll at the moment of unlock |
+| `currentIndex` | Position in the feed at the time of unlock |
+| `timeOfDayBucket` | Time of day (morning / afternoon / evening / night) — groups of 6 hours |
+| `sessionLengthSeconds` | Wall-clock time since the app launched — measures session duration |
+| `rarityWeights` | The current feed distribution weights (mono / common / rare / special) at unlock time |
+| `sourceRareID` | The UUID of the specific rare skin that triggered generation |
+
+### How Behavior Becomes Color
+
+1. **Hashing** — All snapshot fields are combined via `Hasher` into a single `UInt64` seed. Even tiny differences in behavior (one extra swipe, a few more seconds of scrolling) produce a completely different seed.
+
+2. **Seeded PRNG** — The seed initializes a splitmix64 pseudo-random number generator (`SeededPRNG`). Every subsequent decision — hue, saturation, brightness, name, pattern type — is drawn deterministically from this generator.
+
+3. **Palette anchoring** — The PRNG picks a random **anchor hue** (0–360°), a **saturation center** (50–90%), and a **brightness center** (55–95%). A **hue spread** (±18°–43°) defines the neighborhood. All skins in the batch live within this color neighborhood, giving the set a coherent "mood."
+
+4. **Per-skin jitter** — Each individual skin gets small random offsets to hue (within the spread), saturation (±12%), and brightness (±10%), so they're related but distinct.
+
+5. **Batch composition** — Each batch creates:
+   - **6 commons** — solid colors with deterministic adjective-noun names ("Frozen Ember", "Neon Sage")
+   - **3 rares** — 2- or 3-stop gradients
+   - **1 special** — randomly chosen from stripes, dots, SF Symbol scatters, or emoji tiles, using palette-derived colors
+
+6. **Injection** — New skins are added to `DynamicCatalogStore` and get a 100-block boost window so they appear more frequently right after generation.
+
+### The Result
+
+A player who scrolls slowly in the evening gets warm, muted palettes. Someone who power-scrolls through 500 cards at noon gets something completely different. The specific rare skin that triggers generation, combined with the exact scroll position and session metrics, ensures every batch is unique — your colors are a fingerprint of how you used the app.
 
 ### Supporting Infrastructure
 
 | File | Purpose |
 |---|---|
+| `BehaviorSeed.swift` | `BehaviorSnapshot` captures all metrics. `BehaviorSeed.makeSeed(from:)` hashes the snapshot into a `UInt64`. `SeededPRNG` (splitmix64) provides deterministic randomness. `SkinNameGenerator` creates adjective-noun names. `PaletteGenerator` builds the full 10-skin batch. |
 | `GeneratedSet.swift` | `GeneratedSet` model (Codable, stores seed + metadata; skins are transient). `GeneratedSkinMeta` for per-skin provenance. |
-| `BehaviorSeed.swift` | `BehaviorSnapshot` captures scroll stats + time-of-day. `BehaviorSeed.makeSeed(from:)` hashes the snapshot into a `UInt64`. `SeededPRNG` (splitmix64-style) provides deterministic randomness. |
 | `DynamicCatalogStore.swift` | Singleton that holds all generated sets, dynamic skin pools, and boost windows. Posts a `didInjectGeneratedSet` notification on injection. |
-| `InventoryPill+Shimmer.swift` | `ShimmerModifier` — a one-shot gradient sweep overlay applied to the Inventory pill when a set is injected. |
-
-### Known Issues
-
-1. **Colors are too similar** — Every batch divides the hue wheel into equal slices (`Double(i)/6.0` for commons, `Double(i)/3.0` for rares) with the same saturation and brightness. The result is that every generated batch produces nearly identical colors. The `BehaviorSnapshot` / `SeededPRNG` infrastructure exists but is **not actually wired in** — the seed is currently just `Date().timeIntervalSince1970` and the PRNG is never used during skin creation.
-2. **Visual artifacting** — There is a bug on the `unlockedOfRarity` filter line: `commonCatalog.contains(where: { $0.id == $0.id })` compares each element's ID to *itself* (always true), so every skin — including ones the player has never seen — is treated as "unlocked". This causes the locked/unlocked partition to break and can produce unexpected feed behavior and visual glitches.
-3. **Generic names** — Generated skins are named "Generated Common 1", "Generated Rare 3", etc. There is no name-generation logic; they need real creative names (see `docs/NEXT-ACTIONS.md`).
 
 ## Requirements
 
@@ -105,13 +133,13 @@ No external dependencies — the project uses only Apple frameworks (`SwiftUI`, 
 ColorScroller/
 ├── ColorScrollerApp.swift        # App entry point
 ├── ContentView.swift             # Models, view model, views, audio, haptics
+├── BehaviorSeed.swift            # BehaviorSnapshot, seed hashing, SeededPRNG, name & palette generators
 ├── GeneratedSet.swift            # GeneratedSet + GeneratedSkinMeta models
-├── BehaviorSeed.swift            # BehaviorSnapshot, seed hashing, SeededPRNG
 ├── DynamicCatalogStore.swift     # Singleton managing generated skin pools & boosts
-├── InventoryPill+Shimmer.swift   # Shimmer animation modifier
+├── InventoryPill+Shimmer.swift   # (Dead code — shimmer replaced with bounce animation)
 └── Assets.xcassets/              # App icon & accent color
 docs/
-└── NEXT-ACTIONS.md               # Planned features & bug fixes
+└── NEXT-ACTIONS.md               # Completed & remaining tasks
 ```
 
 ## License

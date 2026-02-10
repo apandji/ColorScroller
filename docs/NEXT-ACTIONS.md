@@ -25,7 +25,7 @@
 
 ### Unlock Experience Polish
 
-- **Scroll pause** — Scrolling is disabled for 1.3s on unlock so the player can appreciate the new skin.
+- **Scroll pause** — Scrolling is disabled for 0.8s on unlock so the player can appreciate the new skin.
 - **Ding sound** — Two-note ascending chime (E5 → B5) via a dedicated `AVAudioPlayerNode`, doesn't interfere with the continuous scroll tone.
 - **Haptic punch** — Strong haptic tap (0.9 intensity) fires alongside the ding.
 - **Shimmer artifacting fixed** — Removed the `ShimmerOverlay` (white-flash root cause) and replaced with a spring-bounce scale animation on the inventory pill.
@@ -45,8 +45,31 @@
 - **HUD fade-in** — Swiped/Unlocked pills are hidden while on the leaderboard and fade in when the player scrolls to the first block.
 - **"swipe to begin" prompt** — Bouncing chevron at the bottom of the leaderboard.
 
+### Code Health Audit — Clean ✅
+
+- **Nested duplicate removed** — `ColorScroller/ColorScroller/` was a stale copy of the entire source folder (older code from Jenica's branch). Deleted along with its nested `.xcodeproj`. Root cause of the "Multiple commands produce" build error.
+- **Project file clean** — Single `PBXFileSystemSynchronizedRootGroup` pointing to `ColorScroller/`, single target. No duplicate file references.
+- **Dev team note** — Project-level `DEVELOPMENT_TEAM` (885R49NXMT / Jenica) differs from target-level (4L26YVZYX3 / apandji). Target overrides project, so builds work. Will flip again on cross-push — not worth fighting.
+- **Dead code** — `InventoryPill+Shimmer.swift` still defines `ShimmerOverlay`, `ShimmerModifier`, and `.subtleShimmer()` but none are used. Harmless; can be deleted for cleanliness.
+
+### Performance Lag on Launch — Fixed ✅
+
+- **Removed unused `GeometryReader`** — The outer `GeometryReader { geo in ... }` wrapping the entire `ContentView` body was never referenced. It forced an extra layout pass on every frame, delaying the first render.
+- **Changed `scrollPosition` from `-1` to `nil`** — Starting with `-1` forced SwiftUI to resolve and programmatically scroll to the id-matching item. Starting with `nil` lets the scroll view render at its natural top position (the leaderboard) immediately with no position resolution overhead.
+
+### "keep scrolling" Prompt ✅
+
+- Bouncing chevron + "keep scrolling" text added to every `BlockView` card, positioned at **bottom center** with very low opacity (0.22).
+- Does not conflict with the color name label (label is at bottom-leading with 44pt bottom padding; chevron hugs the 10pt bottom edge).
+
+### Unlock Pause Reduced ✅
+
+- Lowered scroll-disable duration from 1.3s → 0.8s. Toast remains visible 0.4s longer for a smooth exit.
+
 ---
 
 ## Remaining
 
-- Figure out TestFlight
+### Other
+
+- [ ] Figure out TestFlight
