@@ -4,4 +4,13 @@
    <FileRef
       location = "self:">
    </FileRef>
+   <FileRef
+      location = "group:Assets.xcassetsContents.json">
+   </FileRef>
+   <FileRef
+      location = "group:Assets.xcassetsAppIcon.appiconsetContents.json">
+   </FileRef>
+   <FileRef
+      location = "group:Assets.xcassetsColorScroller.appiconsetContents.json">
+   </FileRef>
 </Workspace>

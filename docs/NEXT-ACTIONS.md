@@ -99,8 +99,9 @@
 - [x] Add `recordName` queryable index to `Session`
 - [x] Deploy schema from Development → Production
 - [x] Verify telemetry sync: `[BehaviorLogger] ✅ CloudKit sync OK`
-- [ ] Add App Icon
-- [ ] Archive & upload to TestFlight
+- [x] Add App Icon
+- [x] Archive & upload to TestFlight
+- [ ] Confirm its ready for Wednesday!
 
 ### Future (Post-Exhibition)
 
