@@ -1,6 +1,12 @@
 # ColorScroller
 
-An iOS app that turns mindless scrolling into a collectible color-discovery experience. Swipe through a never-ending vertical feed of colored blocks, unlock skins of increasing rarity, and build your inventory — all accompanied by haptic feedback and an evolving audio tone.
+> The average person spends two hours a day scrolling through social media, adding up to 34 full days per year consumed by the infinite feed.
+>
+> ColorScroller explores the way in which digital addiction is designed. The mechanics of digital addiction is laid bare as a system that rewards users into submission while punishing you for participation. The (used) user swipes through a series of cards. They discover colors, which gets them started. Pleasant auditory and haptic based carrots encourage them to keep going. But, the more they scroll the louder it gets. Decibels and pitch are used as levers of punishment.
+>
+> Here, ColorScroller exposes social media for what it is. A system where the user gets played as a captive entity controlled by an interface that punishes what it simultaneously encourages.
+
+---
 
 ## Features
 
