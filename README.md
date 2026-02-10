@@ -56,6 +56,34 @@ A built-in debug overlay (bottom-left) lets you tune parameters at runtime:
 - **Toast cooldown** slider
 - **New unlock chance** sliders (early / mid / late)
 
+## Color Generation
+
+When the player unlocks a **rare** skin, the app dynamically generates a batch of 10 new skins and injects them into the feed pool. This is handled by `attemptUnlock` in `ScrollerViewModel`, the `DynamicCatalogStore` singleton, and supporting types in `GeneratedSet.swift` and `BehaviorSeed.swift`.
+
+### How It Works
+
+1. **Trigger** — Unlocking any rare skin fires the generation.
+2. **Batch composition** — Each batch creates 6 commons (solid colors), 3 rares (gradients), and 1 special (stripes).
+3. **Hue-based colors** — Colors are built with `Color(hue:saturation:brightness:)` at evenly spaced hue intervals, with fixed saturation (0.7) and brightness (0.9).
+4. **Injection** — The new skins are appended to `DynamicCatalogStore`'s dynamic pools (`dynamicCommons`, `dynamicRares`, `dynamicSpecials`), which are merged with the static catalogs when the feed generates new blocks.
+5. **Boost window** — Generated skins get a 100-block boost window so they appear more frequently right after injection.
+6. **Shimmer cue** — A shimmer animation plays over the Inventory pill to hint that new skins have been added (`InventoryPill+Shimmer.swift`).
+
+### Supporting Infrastructure
+
+| File | Purpose |
+|---|---|
+| `GeneratedSet.swift` | `GeneratedSet` model (Codable, stores seed + metadata; skins are transient). `GeneratedSkinMeta` for per-skin provenance. |
+| `BehaviorSeed.swift` | `BehaviorSnapshot` captures scroll stats + time-of-day. `BehaviorSeed.makeSeed(from:)` hashes the snapshot into a `UInt64`. `SeededPRNG` (splitmix64-style) provides deterministic randomness. |
+| `DynamicCatalogStore.swift` | Singleton that holds all generated sets, dynamic skin pools, and boost windows. Posts a `didInjectGeneratedSet` notification on injection. |
+| `InventoryPill+Shimmer.swift` | `ShimmerModifier` — a one-shot gradient sweep overlay applied to the Inventory pill when a set is injected. |
+
+### Known Issues
+
+1. **Colors are too similar** — Every batch divides the hue wheel into equal slices (`Double(i)/6.0` for commons, `Double(i)/3.0` for rares) with the same saturation and brightness. The result is that every generated batch produces nearly identical colors. The `BehaviorSnapshot` / `SeededPRNG` infrastructure exists but is **not actually wired in** — the seed is currently just `Date().timeIntervalSince1970` and the PRNG is never used during skin creation.
+2. **Visual artifacting** — There is a bug on the `unlockedOfRarity` filter line: `commonCatalog.contains(where: { $0.id == $0.id })` compares each element's ID to *itself* (always true), so every skin — including ones the player has never seen — is treated as "unlocked". This causes the locked/unlocked partition to break and can produce unexpected feed behavior and visual glitches.
+3. **Generic names** — Generated skins are named "Generated Common 1", "Generated Rare 3", etc. There is no name-generation logic; they need real creative names (see `docs/NEXT-ACTIONS.md`).
+
 ## Requirements
 
 - **iOS 26.0+**
@@ -75,9 +103,15 @@ No external dependencies — the project uses only Apple frameworks (`SwiftUI`, 
 
 ```
 ColorScroller/
-├── ColorScrollerApp.swift   # App entry point
-├── ContentView.swift        # All app code — models, view model, views, audio, haptics
-└── Assets.xcassets/         # App icon & accent color
+├── ColorScrollerApp.swift        # App entry point
+├── ContentView.swift             # Models, view model, views, audio, haptics
+├── GeneratedSet.swift            # GeneratedSet + GeneratedSkinMeta models
+├── BehaviorSeed.swift            # BehaviorSnapshot, seed hashing, SeededPRNG
+├── DynamicCatalogStore.swift     # Singleton managing generated skin pools & boosts
+├── InventoryPill+Shimmer.swift   # Shimmer animation modifier
+└── Assets.xcassets/              # App icon & accent color
+docs/
+└── NEXT-ACTIONS.md               # Planned features & bug fixes
 ```
 
 ## License

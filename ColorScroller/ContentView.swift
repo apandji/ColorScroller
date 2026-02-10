@@ -1,14 +1,15 @@
 // Your complete updated code here
 import SwiftUI
+#if canImport(Combine)
 import Combine
+#endif
 import UIKit
 import AVFoundation
 import os.lock
 
-
 // MARK: - Models
 
-enum BlockRarity: String, CaseIterable {
+enum BlockRarity: String, CaseIterable, Codable {
     case common, rare, special
 
     var label: String {
@@ -26,6 +27,8 @@ enum BlockStyle: Equatable {
     case gradient([Color])           // rare
     case stripes(Color, Color)       // special
     case dots(Color, Color)          // special
+    case symbols(String, Color, Color) // special: SF Symbol name, symbol color, background
+    case emoji(String, Color)          // special: emoji character(s), background color
 }
 
 /// A “skin” you can unlock (stable identity)
@@ -88,7 +91,6 @@ enum Haptics {
     }
 }
 
-
 // MARK: - Tone Player (minimal sine)
 
 @MainActor
@@ -111,6 +113,10 @@ final class TonePlayer {
     private var envLevel: Double = 0
     private let attackTime: Double = 0.015
     private let releaseTime: Double = 0.10
+
+    // Ding player (separate node so it doesn't conflict with the continuous tone)
+    private var dingPlayer: AVAudioPlayerNode?
+    private var dingBuffer: AVAudioPCMBuffer?
 
     private var isReady = false
 
@@ -174,7 +180,68 @@ final class TonePlayer {
         engine.attach(src)
         engine.connect(src, to: engine.mainMixerNode, format: format)
         source = src
+
+        // Set up the ding player (separate node for one-shot chime)
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        dingPlayer = player
+        dingBuffer = Self.makeDingBuffer(sampleRate: sampleRate, format: format)
+
         do { try engine.start() } catch {}
+    }
+
+    /// Two-note ascending chime: E5 (659 Hz) → B5 (988 Hz), ~400ms
+    private static func makeDingBuffer(sampleRate: Double, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let duration = 0.40
+        let frameCount = AVAudioFrameCount(sampleRate * duration)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return nil }
+        buffer.frameLength = frameCount
+        guard let data = buffer.floatChannelData else { return nil }
+        let channels = Int(format.channelCount)
+
+        let note1: Double = 659.0   // E5
+        let note2: Double = 988.0   // B5
+        var phase1: Double = 0
+        var phase2: Double = 0
+
+        for frame in 0..<Int(frameCount) {
+            let t = Double(frame) / sampleRate
+
+            // Note 1 envelope: quick attack, 350ms decay
+            let env1: Double
+            if t < 0.008 { env1 = t / 0.008 }
+            else { env1 = max(0, 1.0 - (t - 0.008) / 0.35) }
+
+            // Note 2 starts 60ms later, same shape
+            let t2 = t - 0.06
+            let env2: Double
+            if t2 < 0 { env2 = 0 }
+            else if t2 < 0.008 { env2 = t2 / 0.008 }
+            else { env2 = max(0, 1.0 - (t2 - 0.008) / 0.30) }
+
+            let s1 = sin(phase1) * 0.18 * env1
+            let s2 = sin(phase2) * 0.22 * env2
+            let sample = Float(s1 + s2)
+
+            phase1 += 2.0 * Double.pi * note1 / sampleRate
+            phase2 += 2.0 * Double.pi * note2 / sampleRate
+
+            for ch in 0..<channels {
+                data[ch][frame] = sample
+            }
+        }
+        return buffer
+    }
+
+    func ding() {
+        prepareIfNeeded()
+        guard engine.isRunning,
+              let player = dingPlayer,
+              let buffer = dingBuffer else { return }
+        player.stop()
+        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+        player.play()
     }
 
     func start(frequencyHz: Double, amplitude: Double) {
@@ -211,8 +278,10 @@ final class ScrollerViewModel: ObservableObject {
 
     @Published var activeScrollSeconds: Double = 0
     @Published var isScrolling: Bool = false
+    let sessionStart: Date = Date()
 
     @Published var currentUnlockToast: UnlockToast? = nil
+    @Published var isUnlockPaused: Bool = false
     @Published var debug = DebugTuning()
 
     @Published var currentIndex: Int = 0
@@ -256,10 +325,21 @@ final class ScrollerViewModel: ObservableObject {
     ]
 
     private let specialCatalog: [Skin] = [
+        // Classic patterns
         Skin(id: UUID(uuidString: "13131313-1313-1313-1313-131313131313")!, name: "Barcode Pop",   rarity: .special, style: .stripes(.black, .white)),
         Skin(id: UUID(uuidString: "14141414-1414-1414-1414-141414141414")!, name: "Candy Stripe",  rarity: .special, style: .stripes(.pink, .white)),
         Skin(id: UUID(uuidString: "15151515-1515-1515-1515-151515151515")!, name: "Night Dots",    rarity: .special, style: .dots(.black, .white)),
-        Skin(id: UUID(uuidString: "16161616-1616-1616-1616-161616161616")!, name: "Confetti Dots", rarity: .special, style: .dots(.purple, .yellow))
+        Skin(id: UUID(uuidString: "16161616-1616-1616-1616-161616161616")!, name: "Confetti Dots", rarity: .special, style: .dots(.purple, .yellow)),
+        // SF Symbol patterns
+        Skin(id: UUID(uuidString: "17171717-1717-1717-1717-171717171717")!, name: "Starfield",     rarity: .special, style: .symbols("star.fill", .yellow, .indigo)),
+        Skin(id: UUID(uuidString: "18181818-1818-1818-1818-181818181818")!, name: "Heartbeat",     rarity: .special, style: .symbols("heart.fill", .pink, .black)),
+        Skin(id: UUID(uuidString: "19191919-1919-1919-1919-191919191919")!, name: "Moonrise",      rarity: .special, style: .symbols("moon.stars.fill", .white, .indigo)),
+        Skin(id: UUID(uuidString: "20202020-2020-2020-2020-202020202020")!, name: "Bolt Field",    rarity: .special, style: .symbols("bolt.fill", .orange, .black)),
+        // Emoji patterns
+        Skin(id: UUID(uuidString: "21212121-2121-2121-2121-212121212121")!, name: "Cat Party",     rarity: .special, style: .emoji("😺", .purple)),
+        Skin(id: UUID(uuidString: "23232323-2323-2323-2323-232323232323")!, name: "Fire Walk",     rarity: .special, style: .emoji("🔥", .black)),
+        Skin(id: UUID(uuidString: "24242424-2424-2424-2424-242424242424")!, name: "Bloom Garden",  rarity: .special, style: .emoji("🌸", .mint)),
+        Skin(id: UUID(uuidString: "25252525-2525-2525-2525-252525252525")!, name: "Sparkle Night", rarity: .special, style: .emoji("✨", .indigo))
     ]
 
     init() {
@@ -312,6 +392,11 @@ final class ScrollerViewModel: ObservableObject {
     private func distribution(for seen: Int) -> (mono: Double, common: Double, rare: Double, special: Double) {
         let s = max(0, seen)
 
+        // Once dynamic specials exist (from rare unlocks), give them a small
+        // slice of the distribution so they can actually appear in the feed.
+        let hasDynamicSpecials = !DynamicCatalogStore.shared.dynamicSpecials.isEmpty
+        let earlySpecialWeight: Double = hasDynamicSpecials ? 0.05 : 0.0
+
         if s < 10 { return (1.0, 0, 0, 0) }
         if s < 30 { return (0.60, 0.40, 0, 0) }
 
@@ -333,22 +418,24 @@ final class ScrollerViewModel: ObservableObject {
             return (0, 1.0, 0, 0)
         }
 
+        // Rares unlocked — specials can start appearing if dynamic specials exist
         if s < 70 {
             let t = Double(s - 55) / 15.0
             let rare = 0.20 + (0.30 - 0.20) * t
-            return (0, 1.0 - rare, rare, 0)
+            return (0, 1.0 - rare - earlySpecialWeight, rare, earlySpecialWeight)
         }
 
         if s < 85 {
-            return (0, 0.70, 0.30, 0)
+            return (0, 0.70 - earlySpecialWeight, 0.30, earlySpecialWeight)
         }
 
         if !raresFullyUnlocked() {
-            return (0, 0.70, 0.30, 0)
+            return (0, 0.70 - earlySpecialWeight, 0.30, earlySpecialWeight)
         }
 
+        // Full specials ramp (static + dynamic)
         let t = min(1.0, max(0.0, Double(s - 85) / 10.0))
-        let special = 0.10 * t
+        let special = max(earlySpecialWeight, 0.10 * t)
         let rare = 0.30 + (0.20 - 0.30) * t
         let common = 1.0 - special - rare
         return (0, common, rare, special)
@@ -388,8 +475,17 @@ final class ScrollerViewModel: ObservableObject {
             }
         }()
 
-        let unlockedOfRarity = unlockedSkins.filter { $0.rarity == rarity }
-        let lockedOfRarity = catalog.filter { !unlockedSkinIDs.contains($0.id) }
+        let dynamicPool: [Skin] = {
+            switch rarity {
+            case .common: return DynamicCatalogStore.shared.dynamicCommons
+            case .rare: return DynamicCatalogStore.shared.dynamicRares
+            case .special: return DynamicCatalogStore.shared.dynamicSpecials
+            }
+        }()
+        let allOfRarity: [Skin] = catalog + dynamicPool
+
+        let unlockedOfRarity = allOfRarity.filter { unlockedSkinIDs.contains($0.id) }
+        let lockedOfRarity = allOfRarity.filter { !unlockedSkinIDs.contains($0.id) }
 
         if lastGeneratedWasNewSkin {
             lastGeneratedWasNewSkin = false
@@ -411,7 +507,7 @@ final class ScrollerViewModel: ObservableObject {
             return .fromSkin(pick)
         }
 
-        if let pick = catalog.randomElement(using: &rng) {
+        if let pick = allOfRarity.randomElement(using: &rng) {
             lastGeneratedWasNewSkin = false
             return .fromSkin(pick)
         }
@@ -432,6 +528,38 @@ final class ScrollerViewModel: ObservableObject {
             }
         }
 
+        // Inject behavior-driven generated set for STATIC rare unlocks only
+        // (Dynamic rares don't trigger further generation — prevents infinite chain)
+        let isStaticRare = skin.rarity == .rare && rareCatalog.contains(where: { $0.id == skin.id })
+        if isStaticRare {
+            let w = distribution(for: blocksSeen)
+            let snap = BehaviorSnapshot(
+                totalBlocksViewed: totalBlocksViewed,
+                blocksSeen: blocksSeen,
+                activeScrollSeconds: activeScrollSeconds,
+                isScrolling: isScrolling,
+                currentIndex: currentIndex,
+                timeOfDayBucket: BehaviorSeed.timeOfDayBucket(),
+                sessionLengthSeconds: Date().timeIntervalSince(sessionStart),
+                rarityWeights: RarityWeights(
+                    mono: w.mono, common: w.common, rare: w.rare, special: w.special
+                ),
+                sourceRareID: skin.id
+            )
+            let seed = BehaviorSeed.makeSeed(from: snap)
+            let newSkins = PaletteGenerator.generateBatch(seed: seed)
+
+            let set = GeneratedSet(id: UUID(), sourceRareID: skin.id, timestamp: Date(), seed: seed, skins: newSkins)
+            DynamicCatalogStore.shared.inject(set: set, boostUntil: totalBlocksViewed + 100)
+        }
+
+        // --- Ding + pause so the player can appreciate the unlock ---
+        TonePlayer.shared.ding()
+        Haptics.touch(intensity: 0.9)
+
+        isUnlockPaused = true
+        let pauseDuration: UInt64 = 1_300_000_000 // 1.3s
+
         let now = Date()
         let cooldown = max(0, debug.toastCooldownSeconds)
         if cooldown == 0 || now.timeIntervalSince(lastToastTime) >= cooldown {
@@ -439,11 +567,216 @@ final class ScrollerViewModel: ObservableObject {
             currentUnlockToast = UnlockToast(rarity: skin.rarity, name: skin.name)
 
             Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 1_150_000_000)
+                try? await Task.sleep(nanoseconds: pauseDuration)
                 guard let self else { return }
+                self.isUnlockPaused = false
+                // Keep toast visible a tiny bit longer than the pause
+                try? await Task.sleep(nanoseconds: 400_000_000)
                 if self.currentUnlockToast?.name == skin.name {
                     self.currentUnlockToast = nil
                 }
+            }
+        } else {
+            // Even without a toast, still pause briefly
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: pauseDuration)
+                self?.isUnlockPaused = false
+            }
+        }
+    }
+}
+
+// MARK: - Session Stats Persistence
+
+enum SessionStats {
+    private static let swipedKey  = "cs_lastSessionSwiped"
+    private static let collectedKey = "cs_lastSessionCollected"
+
+    static var lastSwiped: Int {
+        UserDefaults.standard.integer(forKey: swipedKey)
+    }
+    static var lastCollected: Int {
+        UserDefaults.standard.integer(forKey: collectedKey)
+    }
+    static func save(swiped: Int, collected: Int) {
+        UserDefaults.standard.set(swiped, forKey: swipedKey)
+        UserDefaults.standard.set(collected, forKey: collectedKey)
+    }
+}
+
+// MARK: - Leaderboard Card
+
+private struct LeaderboardEntry: Identifiable {
+    let id: Int          // rank (1-based)
+    let name: String
+    let swiped: Int
+    let collected: Int
+    let isPlayer: Bool
+}
+
+struct LeaderboardCard: View {
+    let lastSwiped: Int
+    let lastCollected: Int
+
+    @State private var livePulse = false
+    @State private var chevronBounce = false
+
+    // Internet-handle-style fake names
+    private static let handles = [
+        "void_echo", "pixel_drift", "static_hum", "neon_rain",
+        "ghost_signal", "dead_scroll", "null_feed", "chrome_pulse",
+        "blur_agent", "faded_loop", "lost_signal", "cold_pixel",
+        "wave_rider", "night_code", "zero_bloom", "dark_scroll",
+        "dim_feed", "raw_signal", "soft_glitch", "thin_static",
+        "deep_haze", "flat_noise", "idle_current", "low_orbit"
+    ]
+
+    /// Seed changes every hour → leaderboard feels "live"
+    private func hourSeed() -> UInt64 {
+        let hour = Int(Date().timeIntervalSince1970 / 3600)
+        return UInt64(truncatingIfNeeded: hour) &* 2654435761
+    }
+
+    private var entries: [LeaderboardEntry] {
+        var rng = SeededPRNG(seed: hourSeed())
+
+        // Pick 7 unique handles
+        var pool = Self.handles
+        var names: [String] = []
+        for _ in 0..<7 {
+            let idx = rng.int(in: 0...(pool.count - 1))
+            names.append(pool.remove(at: idx))
+        }
+
+        // Anchor fakes around the player's last session (min 200 so first-timers see activity)
+        let anchor = max(lastSwiped, 200)
+        var all: [(name: String, swiped: Int, collected: Int, isPlayer: Bool)] = []
+
+        for name in names {
+            let mult = rng.double(in: 0.3...3.5)
+            let fakeSwiped = max(40, Int(Double(anchor) * mult))
+            let fakeCollected = max(1, Int(Double(fakeSwiped) * rng.double(in: 0.012...0.045)))
+            all.append((name, fakeSwiped, fakeCollected, false))
+        }
+
+        // Real player entry
+        all.append(("You", lastSwiped, lastCollected, true))
+
+        // Sort descending by swiped
+        all.sort { $0.swiped > $1.swiped }
+
+        return all.enumerated().map { idx, e in
+            LeaderboardEntry(id: idx + 1, name: e.name, swiped: e.swiped, collected: e.collected, isPlayer: e.isPlayer)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            VStack(spacing: 0) {
+                Spacer()
+
+                // LIVE indicator
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 7, height: 7)
+                        .opacity(livePulse ? 1.0 : 0.25)
+                    Text("LIVE")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.red.opacity(0.8))
+                }
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                        livePulse = true
+                    }
+                }
+                .padding(.bottom, 10)
+
+                Text("LEADERBOARD")
+                    .font(.system(size: 26, weight: .black, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.bottom, 4)
+
+                Text("colors scrolled")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .padding(.bottom, 28)
+
+                // Column headers
+                HStack {
+                    Text("#")
+                        .frame(width: 26, alignment: .trailing)
+                    Text("PLAYER")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 8)
+                    Text("SWIPED")
+                        .frame(width: 74, alignment: .trailing)
+                    Text("FOUND")
+                        .frame(width: 54, alignment: .trailing)
+                }
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.3))
+                .padding(.horizontal, 28)
+                .padding(.bottom, 6)
+
+                // Thin separator
+                Rectangle()
+                    .fill(.white.opacity(0.08))
+                    .frame(height: 1)
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 4)
+
+                // Entries
+                ForEach(entries) { entry in
+                    HStack {
+                        Text("\(entry.id)")
+                            .frame(width: 26, alignment: .trailing)
+                            .foregroundStyle(entry.isPlayer ? .white : .white.opacity(0.35))
+
+                        Text(entry.name)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, 8)
+                            .foregroundStyle(entry.isPlayer ? .white : .white.opacity(0.65))
+
+                        Text(entry.swiped, format: .number)
+                            .frame(width: 74, alignment: .trailing)
+                            .foregroundStyle(entry.isPlayer ? .white : .white.opacity(0.5))
+
+                        Text(entry.collected, format: .number)
+                            .frame(width: 54, alignment: .trailing)
+                            .foregroundStyle(entry.isPlayer ? .white : .white.opacity(0.4))
+                    }
+                    .font(.system(size: 14, weight: entry.isPlayer ? .bold : .regular, design: .monospaced))
+                    .padding(.vertical, 9)
+                    .padding(.horizontal, 28)
+                    .background {
+                        if entry.isPlayer {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(.white.opacity(0.07))
+                                .padding(.horizontal, 20)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                // Swipe prompt
+                VStack(spacing: 6) {
+                    Image(systemName: "chevron.compact.down")
+                        .font(.system(size: 24, weight: .semibold))
+                        .offset(y: chevronBounce ? 4 : 0)
+                    Text("swipe to begin")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                }
+                .foregroundStyle(.white.opacity(0.25))
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                        chevronBounce = true
+                    }
+                }
+                .padding(.bottom, 54)
             }
         }
     }
@@ -453,8 +786,8 @@ final class ScrollerViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var vm = ScrollerViewModel()
-    @State private var lastFeedbackIndex: Int = 0
-    @State private var scrollPosition: Int? = 0
+    @State private var lastFeedbackIndex: Int = -1
+    @State private var scrollPosition: Int? = -1
     private let tick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
     @State private var showInventory = false
@@ -468,14 +801,25 @@ struct ContentView: View {
     @State private var currentFrequency: Double = 540
     @State private var nextStepAt: Int = 0
 
+    @State private var pillBounce: Bool = false
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
+                        // Leaderboard is always the first card (id: -1)
+                        LeaderboardCard(
+                            lastSwiped: SessionStats.lastSwiped,
+                            lastCollected: SessionStats.lastCollected
+                        )
+                        .containerRelativeFrame(.horizontal, count: 1, spacing: 0)
+                        .containerRelativeFrame(.vertical, count: 1, spacing: 0)
+                        .id(-1)
+
                         ForEach(Array(vm.blocks.enumerated()), id: \.element.id) { idx, item in
                             BlockView(item: item)
-                                // ✅ exact paging units (fixes “less than full screen”)
+                                // ✅ exact paging units (fixes "less than full screen")
                                 .containerRelativeFrame(.horizontal, count: 1, spacing: 0)
                                 .containerRelativeFrame(.vertical, count: 1, spacing: 0)
                                 .id(idx)
@@ -485,9 +829,11 @@ struct ContentView: View {
                 }
                 .scrollIndicators(.hidden)
                 .scrollTargetBehavior(.paging)
+                .scrollDisabled(vm.isUnlockPaused)
                 .scrollPosition(id: $scrollPosition, anchor: .top)
                 .onChange(of: scrollPosition) { _, newValue in
-                    let idx = newValue ?? 0
+                    let idx = newValue ?? -1
+                    guard idx >= 0 else { return }   // leaderboard card — skip game logic
                     vm.currentIndex = idx
                     vm.ensurePregenIfNeeded(around: idx)
                     vm.onBecameVisible(index: idx)
@@ -539,6 +885,13 @@ struct ContentView: View {
                     vm.tickActiveScrolling(dt: 0.1)
                     vm.ensurePregenIfNeeded(around: vm.currentIndex)
                 }
+                .onReceive(NotificationCenter.default.publisher(for: .didInjectGeneratedSet)) { _ in
+                    pillBounce = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { pillBounce = false }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                    SessionStats.save(swiped: vm.totalBlocksViewed, collected: vm.unlockedSkins.count)
+                }
                 .ignoresSafeArea()
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 0)
@@ -558,7 +911,7 @@ struct ContentView: View {
                         }
                 )
 
-                // --- Top overlays: counters ---
+                // --- Top overlays: counters (hidden on leaderboard) ---
                 VStack {
                     HStack {
                         HStack(spacing: 8) {
@@ -580,18 +933,23 @@ struct ContentView: View {
 
                         Button { showInventory = true } label: {
                             InventoryPill(unlockedCount: vm.unlockedSkins.count)
+                                .scaleEffect(pillBounce ? 1.18 : 1.0)
+                                .animation(.spring(response: 0.3, dampingFraction: 0.45), value: pillBounce)
                         }
                         .padding(.trailing, 14)
                         .padding(.top, 10)
                     }
                     Spacer()
                 }
+                .opacity((scrollPosition ?? -1) >= 0 ? 1 : 0)
+                .animation(.easeInOut(duration: 0.35), value: scrollPosition)
                 .zIndex(30)
 
                 // --- Toast ---
                 if let toast = vm.currentUnlockToast {
                     UnlockToastView(rarity: toast.rarity, name: toast.name)
                         .transition(.scale.combined(with: .opacity))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: vm.currentUnlockToast)
                         .zIndex(40)
                 }
 
@@ -610,7 +968,6 @@ struct ContentView: View {
                 }
                 currentFrequency = min(max(currentFrequency, minFreq), maxFreq)
             }
-            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: vm.currentUnlockToast)
             .sheet(isPresented: $showInventory) {
                 InventoryView(unlocked: vm.unlockedSkins, seenCountBySkinID: vm.seenCountBySkinID)
             }
@@ -654,7 +1011,8 @@ struct BlockView: View {
                         .lineLimit(1)
                 }
             }
-            .padding(18)
+            .padding([.horizontal, .top], 18)
+            .padding(.bottom, 44)          // clears home indicator
             .foregroundStyle(.white)
             .shadow(radius: 8)
         }
@@ -674,6 +1032,10 @@ struct BlockView: View {
                 StripesPattern(colorA: a, colorB: b)
             case .dots(let a, let b):
                 DotsPattern(dotColor: b, baseColor: a)
+            case .symbols(let name, let symbolColor, let bg):
+                SymbolScatterPattern(symbolName: name, symbolColor: symbolColor, baseColor: bg)
+            case .emoji(let char, let bg):
+                EmojiTilePattern(emoji: char, baseColor: bg)
             }
         } else {
             let shade = item.grayscale ?? 50
@@ -769,6 +1131,68 @@ struct DotsPattern: View {
                             let y = CGFloat(r) * spacing
                             let rect = CGRect(x: x, y: y, width: 10, height: 10)
                             ctx.fill(Path(ellipseIn: rect), with: .color(dotColor.opacity(0.85)))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Symbol & Emoji Patterns
+
+struct SymbolScatterPattern: View {
+    let symbolName: String
+    let symbolColor: Color
+    let baseColor: Color
+
+    var body: some View {
+        ZStack {
+            baseColor
+            GeometryReader { geo in
+                let spacing: CGFloat = 48
+                let rows = Int(geo.size.height / spacing) + 3
+                let cols = Int(geo.size.width / spacing) + 3
+
+                Canvas { ctx, size in
+                    guard let resolved = ctx.resolveSymbol(id: 0) else { return }
+                    for r in 0..<rows {
+                        for c in 0..<cols {
+                            let x = CGFloat(c) * spacing + (r.isMultiple(of: 2) ? spacing / 2 : 0)
+                            let y = CGFloat(r) * spacing
+                            ctx.draw(resolved, at: CGPoint(x: x + 12, y: y + 12))
+                        }
+                    }
+                } symbols: {
+                    Image(systemName: symbolName)
+                        .foregroundStyle(symbolColor.opacity(0.7))
+                        .font(.system(size: 20))
+                        .tag(0)
+                }
+            }
+        }
+    }
+}
+
+struct EmojiTilePattern: View {
+    let emoji: String
+    let baseColor: Color
+
+    var body: some View {
+        ZStack {
+            baseColor
+            GeometryReader { geo in
+                let spacing: CGFloat = 52
+                let rows = Int(geo.size.height / spacing) + 3
+                let cols = Int(geo.size.width / spacing) + 3
+
+                Canvas { ctx, size in
+                    let resolved = ctx.resolve(Text(emoji).font(.system(size: 22)))
+                    for r in 0..<rows {
+                        for c in 0..<cols {
+                            let x = CGFloat(c) * spacing + (r.isMultiple(of: 2) ? spacing / 2 : 0)
+                            let y = CGFloat(r) * spacing
+                            ctx.draw(resolved, at: CGPoint(x: x + 14, y: y + 14))
                         }
                     }
                 }
@@ -886,6 +1310,10 @@ struct MiniSwatch: View {
             StripesPattern(colorA: a, colorB: b)
         case .dots(let a, let b):
             DotsPattern(dotColor: b, baseColor: a)
+        case .symbols(let name, let symbolColor, let bg):
+            SymbolScatterPattern(symbolName: name, symbolColor: symbolColor, baseColor: bg)
+        case .emoji(let char, let bg):
+            EmojiTilePattern(emoji: char, baseColor: bg)
         }
     }
 }
@@ -906,6 +1334,10 @@ private extension Skin {
             return UIColor(a)
         case .dots(let base, _):
             return UIColor(base)
+        case .symbols(_, _, let bg):
+            return UIColor(bg)
+        case .emoji(_, let bg):
+            return UIColor(bg)
         }
     }
 }
