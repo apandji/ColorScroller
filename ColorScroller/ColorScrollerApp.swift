@@ -18,6 +18,9 @@ struct ColorScrollerApp: App {
         Task { @MainActor in
             TonePlayer.shared.prepareIfNeeded()
         }
+
+        // Debug: dump all CloudKit records to console on launch
+        BehaviorLogger.shared.fetchAllCloudKitRecords()
     }
 
     var body: some Scene {

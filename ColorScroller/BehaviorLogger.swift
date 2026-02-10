@@ -175,36 +175,56 @@ final class BehaviorLogger {
                 print("[BehaviorLogger] ⚠️ Account status check failed: \(error)")
             }
 
-            do {
-                let record = CKRecord(recordType: "Session")
-                record["sessionID"] = sessionID as NSString
-                record["deviceID"] = deviceID as NSString
-                record["timestamp"] = NSNumber(value: Date().timeIntervalSince1970)
+            let maxRetries = 4
 
-                let fm = FileManager.default
-                if fm.fileExists(atPath: scrollEventsFileURL.path) {
-                    record["scrollEventsFile"] = CKAsset(fileURL: scrollEventsFileURL)
-                }
-                if fm.fileExists(atPath: sessionEndFileURL.path) {
-                    record["sessionEndFile"] = CKAsset(fileURL: sessionEndFileURL)
-                }
+            for attempt in 1...maxRetries {
+                do {
+                    let record = CKRecord(recordType: "Session")
+                    record["sessionID"] = sessionID as NSString
+                    record["deviceID"] = deviceID as NSString
+                    record["timestamp"] = NSNumber(value: Date().timeIntervalSince1970)
 
-                let db = container.publicCloudDatabase
-                try await db.save(record)
-                print("[BehaviorLogger] ✅ CloudKit sync OK — session \(sessionID)")
-            } catch let ckError as CKError {
-                print("[BehaviorLogger] ❌ CloudKit sync failed:")
-                print("  Code: \(ckError.code.rawValue) (\(ckError.code))")
-                print("  Description: \(ckError.localizedDescription)")
-                if let underlying = ckError.userInfo[NSUnderlyingErrorKey] as? NSError {
-                    print("  Underlying: \(underlying)")
+                    let fm = FileManager.default
+                    if fm.fileExists(atPath: scrollEventsFileURL.path) {
+                        record["scrollEventsFile"] = CKAsset(fileURL: scrollEventsFileURL)
+                    }
+                    if fm.fileExists(atPath: sessionEndFileURL.path) {
+                        record["sessionEndFile"] = CKAsset(fileURL: sessionEndFileURL)
+                    }
+
+                    let db = container.publicCloudDatabase
+                    try await db.save(record)
+                    print("[BehaviorLogger] ✅ CloudKit sync OK — session \(sessionID)")
+                    return  // Success — done
+
+                } catch let ckError as CKError {
+                    let retryAfter = ckError.retryAfterSeconds ?? 5.0
+                    let isRetryable = ckError.code == .serviceUnavailable ||
+                                      ckError.code == .requestRateLimited ||
+                                      ckError.code == .networkFailure ||
+                                      ckError.code == .networkUnavailable
+
+                    print("[BehaviorLogger] ⚠️ Attempt \(attempt)/\(maxRetries) failed:")
+                    print("  Code: \(ckError.code.rawValue) (\(ckError.code))")
+                    print("  Description: \(ckError.localizedDescription)")
+
+                    if isRetryable && attempt < maxRetries {
+                        print("  ⏳ Retrying in \(Int(retryAfter))s...")
+                        try? await Task.sleep(nanoseconds: UInt64(retryAfter * 1_000_000_000))
+                        continue
+                    }
+
+                    print("[BehaviorLogger] ❌ CloudKit sync failed after \(attempt) attempts")
+                    if let underlying = ckError.userInfo[NSUnderlyingErrorKey] as? NSError {
+                        print("  Underlying: \(underlying)")
+                    }
+                    // Local files are the source of truth — data is not lost
+                    return
+
+                } catch {
+                    print("[BehaviorLogger] ❌ CloudKit sync failed: \(error)")
+                    return
                 }
-                if let retry = ckError.retryAfterSeconds {
-                    print("  Retry after: \(retry)s")
-                }
-                // Local files are the source of truth — data is not lost
-            } catch {
-                print("[BehaviorLogger] ❌ CloudKit sync failed: \(error)")
             }
         }
     }
@@ -218,5 +238,46 @@ final class BehaviorLogger {
         if fm.fileExists(atPath: scrollEventsFileURL.path) { urls.append(scrollEventsFileURL) }
         if fm.fileExists(atPath: sessionEndFileURL.path) { urls.append(sessionEndFileURL) }
         return urls
+    }
+
+    // MARK: - Debug: Fetch All CloudKit Records
+
+    func fetchAllCloudKitRecords() {
+        Task {
+            let container = CKContainer(identifier: "iCloud.com.apandji.ColorScroller")
+            let db = container.publicCloudDatabase
+
+            let query = CKQuery(recordType: "Session", predicate: NSPredicate(value: true))
+
+            do {
+                let (results, _) = try await db.records(matching: query, resultsLimit: 100)
+                print("\n══════════════════════════════════════")
+                print("📊 CloudKit Records: \(results.count) found")
+                print("══════════════════════════════════════")
+
+                for (_, result) in results {
+                    switch result {
+                    case .success(let record):
+                        let sid = record["sessionID"] as? String ?? "?"
+                        let did = record["deviceID"] as? String ?? "?"
+                        let ts = record["timestamp"] as? Double ?? 0
+                        let date = Date(timeIntervalSince1970: ts)
+                        let hasScrolls = record["scrollEventsFile"] != nil
+                        let hasEnd = record["sessionEndFile"] != nil
+                        print("  Session: \(sid.prefix(8))...")
+                        print("  Device:  \(did.prefix(8))...")
+                        print("  Time:    \(date)")
+                        print("  Scroll events file: \(hasScrolls ? "✅" : "❌")")
+                        print("  Session end file:   \(hasEnd ? "✅" : "❌")")
+                        print("  ──────────────────────────────────")
+                    case .failure(let error):
+                        print("  ❌ Record error: \(error.localizedDescription)")
+                    }
+                }
+                print("══════════════════════════════════════\n")
+            } catch {
+                print("[BehaviorLogger] ❌ CloudKit query failed: \(error.localizedDescription)")
+            }
+        }
     }
 }

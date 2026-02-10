@@ -1495,6 +1495,7 @@ private extension UIColor {
 
 struct DebugPanel: View {
     @ObservedObject var vm: ScrollerViewModel
+    @State private var showTelemetryDashboard = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1551,15 +1552,23 @@ struct DebugPanel: View {
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
             }
 
-            Button("Export Telemetry") {
-                let urls = BehaviorLogger.shared.exportFileURLs()
-                guard !urls.isEmpty,
-                      let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                      let root = scene.windows.first?.rootViewController else { return }
-                let ac = UIActivityViewController(activityItems: urls, applicationActivities: nil)
-                root.present(ac, animated: true)
+            HStack(spacing: 8) {
+                Button("Export Telemetry") {
+                    let urls = BehaviorLogger.shared.exportFileURLs()
+                    guard !urls.isEmpty,
+                          let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                          let root = scene.windows.first?.rootViewController else { return }
+                    let ac = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+                    root.present(ac, animated: true)
+                }
+                .font(.system(size: 12, weight: .semibold))
+
+                Button("CloudKit Dashboard") {
+                    showTelemetryDashboard = true
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.cyan)
             }
-            .font(.system(size: 12, weight: .semibold))
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -1568,6 +1577,9 @@ struct DebugPanel: View {
                 .strokeBorder(.white.opacity(0.12), lineWidth: 1)
         )
         .frame(width: 320)
+        .sheet(isPresented: $showTelemetryDashboard) {
+            TelemetryDashboardView()
+        }
     }
 }
 
