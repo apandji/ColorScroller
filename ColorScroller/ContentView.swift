@@ -60,7 +60,11 @@ struct FeedItem: Identifiable, Equatable {
 // MARK: - Debug / Tuning
 
 struct DebugTuning: Equatable {
+    #if DEBUG
     var showDebugPanel: Bool = true
+    #else
+    var showDebugPanel: Bool = false
+    #endif
     var toastCooldownSeconds: Double = 0.0
     var newUnlockChanceEarly: Double = 0.20
     var newUnlockChanceMid: Double = 0.12
@@ -118,13 +122,16 @@ final class TonePlayer {
     private var dingPlayer: AVAudioPlayerNode?
     private var dingBuffer: AVAudioPCMBuffer?
 
+    private let readyLock = NSLock()
     private var isReady = false
 
     private init() {}
 
     func prepareIfNeeded() {
-        guard !isReady else { return }
+        readyLock.lock()
+        guard !isReady else { readyLock.unlock(); return }
         isReady = true
+        readyLock.unlock()
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, options: [.mixWithOthers])
@@ -360,10 +367,77 @@ final class ScrollerViewModel: ObservableObject {
             blocksSeen = max(blocksSeen, seenIndices.count)
         }
 
-        guard blocks.indices.contains(index) else { return }
-        if let skin = blocks[index].skin {
+        var wasUnlock = false
+        var skinRarity: BlockRarity? = nil
+
+        if blocks.indices.contains(index), let skin = blocks[index].skin {
+            skinRarity = skin.rarity
+            wasUnlock = !unlockedSkinIDs.contains(skin.id)
             seenCountBySkinID[skin.id, default: 0] += 1
             attemptUnlock(skin: skin)
+        }
+
+        // Telemetry — passive, never blocks the UI
+        BehaviorLogger.shared.logScroll(
+            cardIndex: index,
+            totalBlocksViewed: totalBlocksViewed,
+            blocksSeen: blocksSeen,
+            unlockedCount: unlockedSkins.count,
+            activeScrollSeconds: activeScrollSeconds,
+            sessionLengthSeconds: Date().timeIntervalSince(sessionStart),
+            timeOfDayBucket: BehaviorSeed.timeOfDayBucket(),
+            wasUnlock: wasUnlock,
+            skinRarity: skinRarity
+        )
+
+        // Churn prediction → emergency dopamine
+        let interventions = DopamineEngine.shared.evaluate(
+            totalBlocksViewed: totalBlocksViewed,
+            blocksSeen: blocksSeen,
+            unlockedCount: unlockedSkins.count,
+            activeScrollSeconds: activeScrollSeconds,
+            sessionLengthSeconds: Date().timeIntervalSince(sessionStart),
+            timeOfDayBucket: BehaviorSeed.timeOfDayBucket()
+        )
+        if !interventions.isEmpty {
+            executeInterventions(interventions, around: index)
+        }
+    }
+
+    /// Execute dopamine interventions triggered by churn prediction
+    private func executeInterventions(_ interventions: Set<Intervention>, around index: Int) {
+        if interventions.contains(.injectRare) {
+            injectEmergencyReward(around: index)
+        }
+        if interventions.contains(.hapticBurst) {
+            Haptics.touch(intensity: 0.6)
+        }
+        if interventions.contains(.chime) {
+            TonePlayer.shared.ding()
+        }
+    }
+
+    /// Replace the next 1–3 upcoming mono/common cards with locked rares/specials
+    private func injectEmergencyReward(around index: Int) {
+        // Find a locked skin to inject (prefer rares, fall back to specials)
+        let allRares = rareCatalog + DynamicCatalogStore.shared.dynamicRares
+        let lockedRares = allRares.filter { !unlockedSkinIDs.contains($0.id) }
+        let allSpecials = specialCatalog + DynamicCatalogStore.shared.dynamicSpecials
+        let lockedSpecials = allSpecials.filter { !unlockedSkinIDs.contains($0.id) }
+
+        let pool = lockedRares.isEmpty ? lockedSpecials : lockedRares
+        guard let reward = pool.randomElement(using: &rng) else { return }
+
+        // Replace the next mono/common card within the next 3 positions
+        for offset in 1...3 {
+            let targetIdx = index + offset
+            guard blocks.indices.contains(targetIdx) else { continue }
+            let existing = blocks[targetIdx]
+            // Only replace mono or common cards (don't stomp existing rares)
+            if existing.skin == nil || existing.skin?.rarity == .common {
+                blocks[targetIdx] = .fromSkin(reward)
+                return  // one injection is enough
+            }
         }
     }
 
@@ -552,6 +626,9 @@ final class ScrollerViewModel: ObservableObject {
             let set = GeneratedSet(id: UUID(), sourceRareID: skin.id, timestamp: Date(), seed: seed, skins: newSkins)
             DynamicCatalogStore.shared.inject(set: set, boostUntil: totalBlocksViewed + 100)
         }
+
+        // Tell DopamineEngine about the unlock (resets drought counter)
+        DopamineEngine.shared.recordUnlock(atViewCount: totalBlocksViewed)
 
         // --- Ding + pause so the player can appreciate the unlock ---
         TonePlayer.shared.ding()
@@ -786,6 +863,7 @@ struct LeaderboardCard: View {
 
 struct ContentView: View {
     @StateObject private var vm = ScrollerViewModel()
+    @ObservedObject private var dopamine = DopamineEngine.shared
     @State private var lastFeedbackIndex: Int = -1
     @State private var scrollPosition: Int?          // nil = natural top (leaderboard)
     private let tick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
@@ -889,6 +967,11 @@ struct ContentView: View {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
                     SessionStats.save(swiped: vm.totalBlocksViewed, collected: vm.unlockedSkins.count)
+                    BehaviorLogger.shared.logSessionEnd(
+                        totalBlocksViewed: vm.totalBlocksViewed,
+                        totalUnlocks: vm.unlockedSkins.count,
+                        sessionLengthSeconds: Date().timeIntervalSince(vm.sessionStart)
+                    )
                 }
                 .ignoresSafeArea()
                 .simultaneousGesture(
@@ -949,6 +1032,14 @@ struct ContentView: View {
                         .transition(.scale.combined(with: .opacity))
                         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: vm.currentUnlockToast)
                         .zIndex(40)
+                }
+
+                // --- Gaslight Toast (churn intervention) ---
+                if let msg = dopamine.currentGaslightMessage {
+                    GaslightToastView(message: msg)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: dopamine.currentGaslightMessage)
+                        .zIndex(35)
                 }
 
                 // --- Debug ---
@@ -1101,6 +1192,30 @@ struct UnlockToastView: View {
                 .strokeBorder(.white.opacity(0.15), lineWidth: 1)
         )
         .shadow(radius: 24)
+    }
+}
+
+// MARK: - Gaslight Toast View
+
+struct GaslightToastView: View {
+    let message: String
+
+    var body: some View {
+        Text(message)
+            .font(.system(size: 14, weight: .bold, design: .monospaced))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(
+                Capsule()
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(.green.opacity(0.4), lineWidth: 1)
+                    )
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 80)
     }
 }
 
@@ -1435,6 +1550,16 @@ struct DebugPanel: View {
                             vm.debug.newUnlockChanceLate * 100))
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
             }
+
+            Button("Export Telemetry") {
+                let urls = BehaviorLogger.shared.exportFileURLs()
+                guard !urls.isEmpty,
+                      let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                      let root = scene.windows.first?.rootViewController else { return }
+                let ac = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+                root.present(ac, animated: true)
+            }
+            .font(.system(size: 12, weight: .semibold))
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))

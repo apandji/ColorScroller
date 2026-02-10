@@ -61,6 +61,36 @@ Tap the **Unlocked** pill to open a sheet showing every skin you've collected, o
 - How many times you've seen it
 - Its RGB values
 
+### Churn Prediction & Emergency Dopamine
+
+The app monitors your scrolling behavior in real time and predicts when you're about to leave. When churn risk is high, it intervenes:
+
+**How it works:**
+1. A `ScrollSnapshot` feature vector is computed on every scroll — velocity, velocity trend (slowing down?), reward drought (cards since last unlock), session fatigue, engagement depth.
+2. A `ChurnPredictor` evaluates the snapshot and returns `P(churn)` — the probability you're about to stop.
+3. When `P(churn) ≥ 0.55`, the `DopamineEngine` fires interventions:
+
+| Risk Level | Interventions |
+|---|---|
+| **Moderate** (0.55–0.70) | Inject a locked rare/special into the next few cards + surprise haptic |
+| **High** (0.70+) | All of the above + ding chime + leaderboard gaslight ("You just passed pixel_drift!") |
+
+A 12-card cooldown prevents intervention fatigue.
+
+**Architecture — swappable brain:**
+- **Wednesday (ships now):** `HeuristicChurnPredictor` — hand-tuned rules based on the 5 strongest behavioral signals (reward drought, velocity trend, session fatigue, engagement depth, absolute velocity).
+- **Post-exhibition:** `MLChurnPredictor` — a Core ML tabular classifier trained on real user data from the TestFlight deployment. Drop in the `.mlmodel`, swap one line.
+
+### Telemetry & Training Data
+
+Every scroll event and session end is logged to local JSON files and synced to CloudKit:
+
+- **13 fields per scroll event** — timestamp, card index, blocks viewed, unlock count, reward drought, session length, time-of-day, rarity shown, etc.
+- **Local JSON** is the source of truth (works offline)
+- **CloudKit** auto-aggregates from all TestFlight devices into a public database
+- **Debug panel** has an "Export Telemetry" button for manual backup via AirDrop/email
+- **Churn labeling** — post-process: scroll events within 5 cards of session end → `churn = true`
+
 ### Debug Panel
 A built-in debug overlay (bottom-left) lets you tune parameters at runtime:
 
@@ -68,6 +98,7 @@ A built-in debug overlay (bottom-left) lets you tune parameters at runtime:
 - **Force unlock all** toggle
 - **Toast cooldown** slider
 - **New unlock chance** sliders (early / mid / late)
+- **Export Telemetry** button — share raw JSON files
 
 ## Color Generation — Behavior-Seeded Palettes
 
@@ -131,7 +162,7 @@ A player who scrolls slowly in the evening gets warm, muted palettes. Someone wh
 3. Select a simulator or device target.
 4. Build and run (**⌘R**).
 
-No external dependencies — the project uses only Apple frameworks (`SwiftUI`, `Combine`, `AVFoundation`, `UIKit`).
+No external dependencies — the project uses only Apple frameworks (`SwiftUI`, `Combine`, `AVFoundation`, `UIKit`, `CloudKit`).
 
 ## Project Structure
 
@@ -140,9 +171,12 @@ ColorScroller/
 ├── ColorScrollerApp.swift        # App entry point
 ├── ContentView.swift             # Models, view model, views, audio, haptics
 ├── BehaviorSeed.swift            # BehaviorSnapshot, seed hashing, SeededPRNG, name & palette generators
+├── BehaviorLogger.swift          # Telemetry: local JSON logging + CloudKit sync
+├── ChurnEngine.swift             # ScrollSnapshot, ChurnPredictor, DopamineEngine
 ├── GeneratedSet.swift            # GeneratedSet + GeneratedSkinMeta models
 ├── DynamicCatalogStore.swift     # Singleton managing generated skin pools & boosts
 ├── InventoryPill+Shimmer.swift   # (Dead code — shimmer replaced with bounce animation)
+├── ColorScroller.entitlements    # iCloud/CloudKit entitlements
 └── Assets.xcassets/              # App icon & accent color
 docs/
 └── NEXT-ACTIONS.md               # Completed & remaining tasks

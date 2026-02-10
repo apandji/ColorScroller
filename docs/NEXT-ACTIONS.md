@@ -66,10 +66,45 @@
 
 - Lowered scroll-disable duration from 1.3s → 0.8s. Toast remains visible 0.4s longer for a smooth exit.
 
+### Telemetry / Training Data Collection ✅
+
+- **`BehaviorLogger`** — New singleton that passively logs every scroll event and session-end event.
+- **Local JSON (source of truth)** — Events buffer in memory (20 at a time) then flush to per-session JSON files in the app's Documents directory. Works offline, zero dependencies.
+- **CloudKit sync** — On session end, both JSON files are uploaded as `CKAsset`s on a single `Session` record to the public CloudKit database. All 15 TestFlight devices auto-aggregate; viewable in [CloudKit Dashboard](https://icloud.developer.apple.com/dashboard/).
+- **Debug export fallback** — "Export Telemetry" button in the debug panel opens a share sheet with the raw JSON files (AirDrop, email, etc.).
+- **Per-event fields captured** — `sessionID`, `deviceID`, `timestamp`, `cardIndex`, `totalBlocksViewed`, `blocksSeen`, `unlockedCount`, `blocksSinceLastUnlock`, `activeScrollSeconds`, `sessionLengthSeconds`, `timeOfDayBucket`, `wasUnlock`, `skinRarity`.
+- **Churn labeling** — Post-process: every scroll event within 5 cards of a `SessionEnd` timestamp gets `churn = true`. This is the training target for a future Create ML tabular classifier.
+
+### Churn Prediction & Emergency Dopamine ✅
+
+- **`ChurnEngine.swift`** — Complete churn prediction → intervention pipeline.
+- **`ScrollSnapshot`** — Feature vector computed per scroll: velocity, velocity trend (linear regression slope over last 10 events), reward drought, session fatigue, engagement depth, unlock density.
+- **`ChurnPredictor` protocol** — Swappable brain with two implementations:
+  - `HeuristicChurnPredictor` (ships Wednesday) — hand-tuned rules on 5 signals: reward drought (40%), velocity trend (25%), session fatigue (20%), engagement depth (10%), absolute velocity (10%).
+  - `MLChurnPredictor` (placeholder, uncomment when `.mlmodel` is ready) — Core ML tabular classifier.
+- **`DopamineEngine`** — Singleton that evaluates every scroll event:
+  - Moderate risk (P ≥ 0.55): inject locked rare into next 1–3 cards + haptic burst.
+  - High risk (P ≥ 0.70): + ding chime + leaderboard gaslight ("You just passed pixel_drift!").
+  - 12-card cooldown prevents intervention fatigue.
+- **`GaslightToastView`** — Translucent capsule toast with green border, slides in from top, auto-dismisses after 2.5s.
+- **Feed manipulation** — `injectEmergencyReward()` replaces upcoming mono/common cards with locked rares/specials.
+
 ---
 
 ## Remaining
 
-### Other
+### Pre-TestFlight Checklist
 
-- [ ] Figure out TestFlight
+- [x] Create CloudKit `Session` record type in Dashboard
+- [x] Add `recordName` queryable index to `Session`
+- [x] Deploy schema from Development → Production
+- [x] Verify telemetry sync: `[BehaviorLogger] ✅ CloudKit sync OK`
+- [ ] Add App Icon
+- [ ] Archive & upload to TestFlight
+
+### Future (Post-Exhibition)
+
+- [ ] Export CloudKit data → CSV, label churn events, train Create ML tabular classifier
+- [ ] Drop trained `.mlmodel` into project, swap `HeuristicChurnPredictor` → `MLChurnPredictor`
+- [ ] Personalize leaderboard gaslighting based on per-user engagement depth
+- [ ] Tune churn threshold + cooldown based on real-world data
